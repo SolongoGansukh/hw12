@@ -1,0 +1,468 @@
+---
+title: "Bike Sales Analysis"
+author: "Solongo Gansukh"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+# 1. Setup and Data Import
+
+## Load Required Packages
+
+```{r load-packages}
+# Install packages if needed (run once)
+# install.packages(c("readxl", "tidyverse", "lubridate", "tidyquant", "writexl"))
+
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(lubridate)
+library(tidyquant)
+```
+
+## Import Data
+
+```{r import-data}
+# Import Excel files
+bikes_tbl <- read_excel("./bikes.xlsx")
+bikeshops_tbl <- read_excel("./bikeshops.xlsx")
+orderlines_tbl <- read_excel("./orderlines.xlsx")
+
+# Examine the data structure
+glimpse(bikes_tbl)
+glimpse(bikeshops_tbl)
+glimpse(orderlines_tbl)
+```
+
+# 2. Data Wrangling
+
+## Join Tables
+
+```{r join-tables}
+# Join all three tables using the pipe operator
+bike_orderlines_wrangled_tbl <- orderlines_tbl %>% 
+  left_join(bikes_tbl, by = c("product.id" = "bike.id")) %>% 
+  left_join(bikeshops_tbl, by = c("customer.id" = "bikeshop.id")) %>% 
+  
+  # Separate description into multiple columns
+  separate(description, 
+           into = c('category.1', 'category.2', 'frame.material'), 
+           sep  = ' - ') %>% 
+  
+  # Separate location into city and state
+  separate(location, 
+           into = c('city', 'state'), 
+           sep  = ', ',
+           remove = FALSE) %>%
+  
+  # Calculate total price
+  mutate(total.price = price * quantity) %>% 
+  
+  # Reorganize and rename columns
+  select(-...1, -location) %>% 
+  select(contains('date'), contains('id'), 
+         contains('order'), 
+         quantity, price, total.price, 
+         everything()) %>% 
+  rename(order_date = order.date) %>%
+  set_names(names(.) %>% str_replace_all("\\.", "_"))
+
+# Display first few rows
+head(bike_orderlines_wrangled_tbl)
+
+# Save cleaned data
+saveRDS(bike_orderlines_wrangled_tbl, './bike_orderlines.rds')
+```
+
+# 3. Exploratory Data Analysis
+
+## Key dplyr Functions
+
+### Select and Filter Operations
+
+```{r select-filter}
+# Calculate average total price using pull()
+avg_price <- bike_orderlines_wrangled_tbl %>% 
+  pull(total_price) %>% 
+  mean()
+
+cat("Average Order Total Price: $", round(avg_price, 2), "\n")
+
+# Filter bikes above average price
+bikes_tbl %>% 
+  select(model, price) %>% 
+  filter(price > mean(price)) %>% 
+  arrange(desc(price)) %>%
+  head(10)
+```
+
+### Unique Categories
+
+```{r unique-categories}
+# Q1: What are the unique categories of products?
+cat("Primary Categories:\n")
+bike_orderlines_wrangled_tbl %>% distinct(category_1) %>% pull()
+
+cat("\nSecondary Categories:\n")
+bike_orderlines_wrangled_tbl %>% distinct(category_2) %>% pull()
+
+cat("\nFrame Materials:\n")
+bike_orderlines_wrangled_tbl %>% distinct(frame_material) %>% pull()
+```
+
+### Sales by Category
+
+```{r sales-by-category}
+# Q2: Which product categories have the largest sales?
+sales_by_category <- bike_orderlines_wrangled_tbl %>% 
+  select(category_1, total_price) %>% 
+  group_by(category_1) %>% 
+  summarise(sales = sum(total_price)) %>%
+  ungroup() %>% 
+  arrange(desc(sales)) %>%
+  rename(`Primary Category` = category_1, 
+         Sales = sales) %>% 
+  mutate(Sales_Formatted = scales::dollar(Sales))
+
+knitr::kable(sales_by_category, 
+             caption = "Total Sales by Primary Category",
+             format.args = list(big.mark = ","))
+```
+
+# 4. Time Series Analysis
+
+## Sales Trends Over Time
+
+```{r time-series-prep}
+# Create function to calculate percentage differences
+calculate_pct_diff <- function(data){
+  data %>%
+    mutate(sales_lag_1 = lag(sales, n = 1)) %>% 
+    mutate(sales_lag_1 = case_when(
+      is.na(sales_lag_1) ~ sales,
+      TRUE ~ sales_lag_1
+    )) %>% 
+    mutate(diff_1 = sales - sales_lag_1) %>% 
+    mutate(pct_diff_1 = diff_1 / sales_lag_1) %>% 
+    mutate(pct_diff_1_chr = scales::percent(pct_diff_1))
+}
+
+# Calculate yearly sales
+bike_sales_y <- bike_orderlines_wrangled_tbl %>%
+  select(order_date, total_price) %>% 
+  mutate(order_date = ymd(order_date)) %>% 
+  mutate(year = year(order_date)) %>% 
+  group_by(year) %>% 
+  summarise(sales = sum(total_price)) %>% 
+  ungroup()
+
+# Apply percentage difference calculation
+bike_sales_y_analysis <- calculate_pct_diff(bike_sales_y)
+
+knitr::kable(bike_sales_y_analysis,
+             caption = "Yearly Sales with Year-over-Year Growth",
+             format.args = list(big.mark = ","))
+```
+
+## Monthly Sales Aggregation
+
+```{r monthly-sales}
+# Calculate monthly sales
+bike_sales_m <- bike_orderlines_wrangled_tbl %>% 
+  select(order_date, total_price) %>% 
+  mutate(order_date = ymd(order_date)) %>% 
+  mutate(year_month = floor_date(order_date, unit = "month")) %>%
+  group_by(year_month) %>% 
+  summarise(sales = sum(total_price)) %>%
+  ungroup()
+
+# Show first and last 6 months
+head(bike_sales_m, 6)
+tail(bike_sales_m, 6)
+```
+
+# 5. Data Visualizations
+
+## Line Chart: Revenue Trends
+
+```{r revenue-line-chart}
+bike_sales_y %>% 
+  ggplot(aes(x = year, y = sales, color = sales)) +
+  geom_point(size = 5) + 
+  geom_line(linewidth = 2) + 
+  geom_smooth(method = "lm", formula = 'y ~ x', se = FALSE) +
+  expand_limits(y = c(0, 20e6)) + 
+  scale_colour_continuous(low = "red", high = "black", 
+                          labels = scales::dollar_format(scale = 1/1e6, suffix = "M")) +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1/1e6, suffix = "M")) + 
+  labs(
+    title = "Revenue Trend Analysis",
+    subtitle = "Sales are trending up and to the right!",
+    x = "Year", 
+    y = "Sales (Millions)",
+    color = "Rev ($M)",
+    caption = "Total sales from 2011 to 2015"
+  ) +
+  theme_tq()
+```
+
+## Bar Chart: Revenue by Category
+
+```{r revenue-bar-chart}
+revenue_by_category2_tbl <- bike_orderlines_wrangled_tbl %>% 
+  select(category_2, total_price) %>% 
+  group_by(category_2) %>% 
+  summarise(revenue = sum(total_price)) %>% 
+  ungroup()
+
+revenue_by_category2_tbl %>% 
+  mutate(category_2 = category_2 %>% as_factor() %>% fct_reorder(revenue)) %>% 
+  ggplot(aes(category_2, revenue)) +
+  geom_col(fill = "#2c3e50") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1/1e6, suffix = "M")) +
+  labs(
+    title = "Revenue by Bike Category",
+    x = "Category",
+    y = "Revenue (Millions)"
+  ) +
+  theme_tq()
+```
+
+## Scatter Plot: Order Value Analysis
+
+```{r scatter-plot}
+order_value_tbl <- bike_orderlines_wrangled_tbl %>% 
+  select(order_id, order_line, total_price, quantity) %>% 
+  group_by(order_id) %>% 
+  summarize(
+    total_quantity = sum(quantity),
+    total_price = sum(total_price)
+  ) %>% 
+  ungroup()
+
+order_value_tbl %>% 
+  ggplot(aes(x = total_quantity, y = total_price)) +
+  geom_point(alpha = 0.5, size = 2, color = "#18BC9C") +
+  geom_smooth(method = "lm", se = TRUE, color = "#2c3e50") +
+  scale_y_continuous(labels = scales::dollar_format()) +
+  labs(
+    title = "Order Value vs. Quantity",
+    subtitle = "Relationship between items ordered and total price",
+    x = "Total Quantity",
+    y = "Total Price"
+  ) +
+  theme_tq()
+```
+
+## Histogram: Price Distribution
+
+```{r histogram}
+bike_orderlines_wrangled_tbl %>% 
+  distinct(price, model, frame_material) %>% 
+  ggplot(aes(price, fill = frame_material)) +
+  geom_histogram(bins = 30, color = "white") + 
+  facet_wrap(~ frame_material, ncol = 1) + 
+  scale_fill_tq() + 
+  scale_x_continuous(labels = scales::dollar_format()) +
+  labs(
+    title = "Price Distribution by Frame Material",
+    x = "Price",
+    y = "Count",
+    fill = "Frame Material"
+  ) +
+  theme_tq() +
+  theme(legend.position = "none")
+```
+
+## Box Plot: Price by Category
+
+```{r boxplot}
+unit_price_by_cat2_tbl <- bike_orderlines_wrangled_tbl %>% 
+  select(category_2, model, price) %>% 
+  distinct() %>% 
+  mutate(category_2 = as_factor(category_2) %>% fct_reorder(price))
+
+unit_price_by_cat2_tbl %>% 
+  ggplot(aes(category_2, price)) + 
+  geom_boxplot(fill = "#18BC9C", alpha = 0.7) + 
+  coord_flip() +
+  scale_y_continuous(labels = scales::dollar_format()) +
+  labs(
+    title = "Price Distribution by Bike Category",
+    x = "Category",
+    y = "Price"
+  ) +
+  theme_tq()
+```
+
+## Lollipop Chart: Top 10 Customers
+
+```{r lollipop-chart}
+n <- 10
+
+top_customers <- bike_orderlines_wrangled_tbl %>% 
+  select(bikeshop_name, total_price) %>% 
+  mutate(bikeshop_name = as_factor(bikeshop_name) %>% fct_lump(n = n, w = total_price)) %>% 
+  group_by(bikeshop_name) %>% 
+  summarize(revenue = sum(total_price)) %>% 
+  ungroup() %>% 
+  mutate(bikeshop_name = bikeshop_name %>% fct_reorder(revenue)) %>% 
+  mutate(bikeshop_name = bikeshop_name %>% fct_relevel("Other", after = 0)) %>% 
+  arrange(desc(bikeshop_name)) %>% 
+  mutate(revenue_text = scales::dollar(revenue)) %>% 
+  mutate(cum_pct = cumsum(revenue) / sum(revenue)) %>% 
+  mutate(cum_pct_txt = scales::percent(cum_pct)) %>% 
+  mutate(rank = row_number()) %>% 
+  mutate(rank = case_when(
+    rank == max(rank) ~ NA_integer_, 
+    TRUE ~ rank
+  )) %>% 
+  mutate(label_text = str_glue("Rank: {rank}\nRev: {revenue_text}\nCum: {cum_pct_txt}"))
+
+top_customers %>% 
+  ggplot(aes(revenue, bikeshop_name)) +
+  geom_segment(aes(xend = 0, yend = bikeshop_name), color = "gray50") +
+  geom_point(aes(size = revenue), color = "#18BC9C") + 
+  geom_label(aes(label = label_text), hjust = "inward", size = 3) +
+  scale_x_continuous(labels = scales::dollar_format(scale = 1/1e6, suffix = "M")) +
+  labs(
+    title = "Top 10 Customers by Revenue",
+    subtitle = "With cumulative percentage contribution",
+    x = "Revenue (Millions)",
+    y = "Customer"
+  ) +
+  theme_tq() +
+  theme(legend.position = "none")
+```
+
+## Heatmap: Customer Purchasing Patterns
+
+```{r heatmap}
+pct_sales_by_customer_tbl <- bike_orderlines_wrangled_tbl %>% 
+  select(bikeshop_name, category_1, category_2, quantity) %>% 
+  group_by(bikeshop_name, category_1, category_2) %>% 
+  summarise(total_qty = sum(quantity)) %>% 
+  ungroup() %>% 
+  group_by(bikeshop_name) %>% 
+  mutate(pct = total_qty / sum(total_qty)) %>% 
+  ungroup() %>% 
+  mutate(bikeshop_name = as.factor(bikeshop_name) %>% fct_rev())
+
+pct_sales_by_customer_tbl %>% 
+  ggplot(aes(category_2, bikeshop_name)) +
+  geom_tile(aes(fill = pct)) +
+  geom_text(aes(label = scales::percent(pct, accuracy = 1)), size = 2.5) +
+  facet_wrap(~ category_1, scales = "free_x") +
+  scale_fill_gradient(low = "white", high = "#2c3e50") +
+  labs(
+    title = "Heatmap of Customer Purchasing Habits", 
+    subtitle = "Percentage of purchases by category",
+    x = "Bike Type (Category 2)", 
+    y = "Customer",
+    fill = "% of Sales"
+  ) + 
+  theme_tq() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8), 
+    plot.title = element_text(face = "bold")
+  )
+```
+
+# 6. Feature Engineering
+
+## Custom Function: Separate Bike Model
+
+```{r feature-engineering}
+separate_bike_model <- function(data, append = TRUE) {
+  if (!append) {
+    data <- data %>% select(model)
+  }
+  
+  output_tbl <- data %>% 
+    select(model) %>% 
+    # Fix typos
+    mutate(model = case_when(
+      model == "CAAD Disc Ultegra" ~ "CAAD12 Disc Ultegra", 
+      model == "Supersix Evo Hi-Mod Utegra" ~ "Supersix Evo Hi-Mod Ultegra",
+      model == "Syapse Carbon Tiagra" ~ "Synapse Carbon Tiagra", 
+      TRUE ~ model
+    )) %>% 
+    # Separate by spaces
+    separate(col = model, 
+             into = str_c("model_", 1:7), 
+             sep = " ", 
+             remove = FALSE, 
+             fill = "right") %>% 
+    # Extract base model
+    mutate(model_base = case_when(
+      str_detect(str_to_lower(model_1), "supersix") ~ str_c(model_1, model_2, sep = " "),
+      str_detect(str_to_lower(model_1), "beast") ~ str_c(model_1, model_2, model_3, model_4, sep = " "),
+      str_detect(str_to_lower(model_1), "bad") ~ str_c(model_1, model_2, sep = " "), 
+      str_detect(str_to_lower(model_1), "fat") ~ str_c(model_1, model_2, sep = " "), 
+      str_detect(str_to_lower(model_1), "29") ~ str_c(model_1, model_2, sep = " "),
+      TRUE ~ model_1
+    )) %>% 
+    # Extract tier
+    mutate(model_tier = model %>% str_replace(model_base, replacement = "") %>% str_trim()) %>% 
+    select(-matches("model_[0-9]")) %>% 
+    # Create feature flags
+    mutate(
+      black = model_tier %>% str_to_lower() %>% str_detect("black") %>% as.numeric(),
+      red = model_tier %>% str_to_lower() %>% str_detect("red") %>% as.numeric(),
+      hi_mod = model_tier %>% str_to_lower() %>% str_detect("hi_mod") %>% as.numeric(),
+      team = model_tier %>% str_to_lower() %>% str_detect("team") %>% as.numeric(),
+      ultegra = model_tier %>% str_to_lower() %>% str_detect("ultegra") %>% as.numeric(),
+      dura_ace = model_tier %>% str_to_lower() %>% str_detect("dura_ace") %>% as.numeric(),
+      disc = model_tier %>% str_to_lower() %>% str_detect("disc") %>% as.numeric()
+    )
+  
+  return(output_tbl)
+}
+
+# Apply the function
+bikes_enhanced <- separate_bike_model(bikes_tbl, append = TRUE)
+
+# Display sample
+head(bikes_enhanced) %>% 
+  select(model, model_base, model_tier, black, ultegra, disc) %>%
+  knitr::kable(caption = "Sample of Enhanced Bike Features")
+```
+
+# 7. Summary and Insights
+
+## Key Findings
+
+```{r summary}
+cat("=== ANALYSIS SUMMARY ===\n\n")
+
+cat("Total Revenue:", scales::dollar(sum(bike_orderlines_wrangled_tbl$total_price)), "\n")
+cat("Total Orders:", n_distinct(bike_orderlines_wrangled_tbl$order_id), "\n")
+cat("Total Customers:", n_distinct(bike_orderlines_wrangled_tbl$bikeshop_name), "\n")
+cat("Average Order Value:", scales::dollar(mean(order_value_tbl$total_price)), "\n\n")
+
+cat("Top Category:", sales_by_category$`Primary Category`[1], "\n")
+cat("Sales Growth (2011-2015):", 
+    bike_sales_y_analysis$pct_diff_1_chr[nrow(bike_sales_y_analysis)], "\n")
+```
+
+---
+
+**Report Generated:** `r Sys.Date()`  
+**Analysis Period:** 2011-2015  
+**Data Source:** Bike Sales Transaction Data
