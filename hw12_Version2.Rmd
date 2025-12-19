@@ -466,3 +466,10 @@ cat("Sales Growth (2011-2015):",
 **Report Generated:** `r Sys.Date()`  
 **Analysis Period:** 2011-2015  
 **Data Source:** Bike Sales Transaction Data
+rsconnect::writeManifest(contentCategory = "site")
+{
+  "primary_file": "hw12-2.Rmd",
+  "type": "rmarkdown",
+  "title": "HW12",
+  "author": "SolongoGansukh"
+}
